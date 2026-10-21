@@ -128,6 +128,17 @@ terraform -chdir=terraform/persistent plan
 
 internal ALB 는 VPC 안에서만 닿으므로 클러스터 안의 curl 파드로 확인합니다.
 
+### 팀원 접속 (평일 09:00~19:00, 켜져 있을 때)
+준비: aws cli + [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html), 본인 IAM 키로 `aws configure` (리전 `ap-northeast-2`). EKS 는 레포 변수 `TEAM_MEMBER_ARNS` 에 본인 ARN 이 있어야 함.
+```bash
+./scripts/aws/tunnel.sh api     # localhost:8080 → internal ALB → gateway (예: curl localhost:8080/v1/stores)
+./scripts/aws/tunnel.sh db      # localhost:15432 → RDS (계정은 Secrets Manager <SECRET_PREFIX>/<서비스>)
+./scripts/aws/tunnel.sh redis   # localhost:16379 → ElastiCache (TLS + AUTH)
+./scripts/aws/tunnel.sh mq      # https://localhost:15671 → Amazon MQ 콘솔
+aws eks update-kubeconfig --name baedalsak-prod --region ap-northeast-2
+kubectl -n prod get pods; kubectl -n prod logs deploy/order
+```
+
 ## 4. 오늘 버전에서 설계와 다른 점 (임시)
 
 | 항목 | 설계 | 지금 | 바꿀 때 |
