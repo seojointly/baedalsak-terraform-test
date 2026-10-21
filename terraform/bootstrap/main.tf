@@ -91,7 +91,11 @@ data "aws_iam_policy_document" "gha_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:*"]
+      # 기존 형식 + immutable subject 형식(repo:<owner>@<id>/<repo>@<id>:...) — 새 레포는 후자가 기본
+      values = [
+        "repo:${var.github_repo}:*",
+        "repo:${split("/", var.github_repo)[0]}@*/${split("/", var.github_repo)[1]}@*:*",
+      ]
     }
   }
 }
