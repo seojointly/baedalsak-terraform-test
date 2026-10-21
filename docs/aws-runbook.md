@@ -11,8 +11,12 @@ terraform/
 └── ephemeral/   매일 apply·destroy: VPC · NAT · EKS · 노드그룹 · internal ALB · 대상 그룹 · RDS · MQ · Valkey · Bastion · Pod Identity · SSM
 scripts/aws/     env.sh(공통 변수) · addons.sh · db-init.sh · deploy.sh · smoke-test.sh · down.sh  (워크플로가 호출)
 .github/workflows/
-├── infra.yml    plan / persistent / up / down
-└── images.yml   서버 레포(SERVER_REPO) → ECR
+├── aws-up.yml          AWS 켜기 (평일 09:00 자동 + 수동)
+├── aws-down.yml        AWS 끄기 (평일 19:00 자동 + 수동, 최종 스냅샷 7개 보관)
+├── aws-plan.yml        AWS 변경 미리보기 (plan)
+├── aws-persistent.yml  AWS 상시 리소스 적용 (ECR·Secrets)
+├── aws-stack.yml       (공통) 위 4개가 호출하는 본체 — 직접 실행 안 함
+└── images.yml          앱 이미지 빌드 (서버 레포 SERVER_REPO → ECR)
 ```
 
 ## 0. 환경변수
@@ -94,14 +98,23 @@ terraform -chdir=terraform/persistent plan
 
 ## 2. 실행 순서 (Actions 탭)
 
-1. **infra** · action=`plan` → 오류 없는지 확인 (변수 누락 시 `check variables` 단계에서 멈춤)
-2. **infra** · action=`persistent` → ECR·Secrets Manager 생성 (처음 한 번)
-3. **images** · server_ref 비움(=`SERVER_REF`) → Summary 의 `image_tag` 메모 (서버 커밋 7자리)
-4. **infra** · action=`up` · image_tag=`<3번 태그>` → 약 30~40분 (RDS Multi-AZ·MQ 생성이 가장 오래 걸림)
-   - 마지막 단계 `smoke test` 가 `SMOKE TEST PASSED` 면 성공
-5. 퇴근 전 **infra** · action=`down` → 앱·애드온 삭제 후 ephemeral destroy (RDS 최종 스냅샷 남음)
+처음 한 번:
 
-다음 날 `up` 은 가장 최근 최종 스냅샷(`<PROJECT>-<ENV_NAME>-final-*`)에서 RDS 를 자동 복원합니다.
+1. **AWS 변경 미리보기 (plan)** → 오류 없는지 확인 (변수 누락 시 `check variables` 단계에서 멈춤)
+2. **AWS 상시 리소스 적용 (ECR·Secrets)** → ECR·Secrets Manager 생성
+3. **앱 이미지 빌드 (서버 → ECR)** · server_ref 비움(=`SERVER_REF`) → Summary 에 `image_tag` (서버 커밋 7자리)
+
+매일 (자동, 월~금 · 기본 브랜치의 워크플로 기준):
+
+| 시각 (KST) | 워크플로 | 하는 일 |
+|---|---|---|
+| 09:00 | **AWS 켜기** | 약 25~30분. image_tag 를 비우면 ECR 에 마지막으로 빌드된 이미지를 배포. 마지막 단계 `smoke test` 가 `SMOKE TEST PASSED` 면 성공 |
+| 19:00 | **AWS 끄기** | 앱·애드온 삭제 → ephemeral destroy (RDS 최종 스냅샷 생성) → 최종 스냅샷 최신 7개만 보관 |
+
+- 켜기는 가장 최근 최종 스냅샷(`<PROJECT>-<ENV_NAME>-final-*`)에서 RDS 를 복원합니다 (스냅샷이 없으면 빈 DB 로 생성 → Flyway 가 테이블 생성).
+- 새 서버 코드를 반영하려면 **앱 이미지 빌드** 를 먼저 실행하세요 (켜기는 이미지를 빌드하지 않음).
+- 예약 실행은 GitHub 사정으로 수 분~수십 분 늦게 시작될 수 있고, 공휴일은 따로 막지 않습니다.
+- 켜기·끄기는 같은 동시 실행 그룹(`aws-stack`)이라 겹치면 앞의 실행이 끝날 때까지 기다립니다.
 
 ## 3. smoke test 가 보는 것
 

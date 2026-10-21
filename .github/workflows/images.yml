@@ -1,12 +1,12 @@
 # =============================================================================
 # 앱 이미지 빌드 → ECR (<PROJECT>-<ENV_NAME>/<서비스>:<서버 커밋 SHA 7자리>)
 #   서버 레포(vars.SERVER_REPO)를 체크아웃해서 서비스 6개를 amd64 로 빌드
-#   끝나면 Summary 에 태그가 나옴 → infra 워크플로 up 의 image_tag 로 사용
-#   선행: infra 워크플로 action=persistent (ECR 저장소 생성)
+#   끝나면 Summary 에 태그가 나옴 → "AWS 켜기" 의 image_tag 로 사용 (비우면 마지막 빌드를 자동 사용)
+#   선행: "AWS 상시 리소스 적용" 워크플로 (ECR 저장소 생성)
 # 레포 Variables: AWS_REGION · PROJECT · ENV_NAME · AWS_ROLE_ARN · SERVER_REPO · SERVER_REF
 # 레포 Secrets  : SERVER_REPO_TOKEN (서버 레포가 private 일 때만 — contents:read 권한 PAT)
 # =============================================================================
-name: images
+name: 앱 이미지 빌드 (서버 → ECR)
 
 on:
   workflow_dispatch:
@@ -46,7 +46,7 @@ jobs:
           : "${SERVER_REF:?입력 server_ref 또는 레포 변수 SERVER_REF 가 필요합니다}"
 
       # public 서버 레포는 기본 토큰, private 이면 secrets.SERVER_REPO_TOKEN
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ env.SERVER_REPO }}
           ref: ${{ env.SERVER_REF }}
@@ -55,17 +55,17 @@ jobs:
       - id: tag
         run: echo "tag=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Dockerfile
