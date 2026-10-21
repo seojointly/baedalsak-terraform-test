@@ -1,0 +1,25 @@
+# 환경변수 (실제 값) — .env.example 만 커밋
+.env
+.env.*
+!.env.example
+
+# Terraform (.terraform.lock.hcl 은 커밋)
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfplan
+*.tfvars
+!*.tfvars.example
+crash*.log
+
+# 자격 증명·키
+kubeconfig
+*.kubeconfig
+*.pem
+*.key
+
+# 기타
+*.zip
+.vscode/
+.idea/
+.DS_Store

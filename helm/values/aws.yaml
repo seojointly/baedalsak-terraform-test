@@ -1,0 +1,63 @@
+# =============================================================================
+# AWS (EKS, namespace = ENV_NAME)
+#   "" 로 둔 환경별 값은 배포 스크립트(scripts/aws/deploy.sh)가 환경변수·SSM 값으로 --set 함
+#   적용 순서: 차트 기본값 → services/<서비스>.yaml → aws.yaml → 스크립트 --set
+# =============================================================================
+global:
+  imageRegistry: ""                 # --set: <ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com
+  imageNamespace: ""                # --set: <PROJECT>-<ENV_NAME> (ECR 저장소 <PROJECT>-<ENV_NAME>/<서비스>)
+  imagePullSecrets: []
+
+  springProfile: ""                 # 운영 프로필 이름 미정 → 기본(application.yml)
+
+  db:
+    host: ""                        # --set: RDS 주소
+    port: 5432
+  rabbitmq:
+    host: ""                        # --set: Amazon MQ 주소
+    port: 5671                      # Amazon MQ 는 AMQPS(TLS) 5671 만 받음
+    vhost: ""                       # --set: /<ENV_NAME>
+    sslEnabled: true
+  redisSession:
+    host: ""                        # --set: ElastiCache 주소
+    port: 6379                      # TLS + AUTH (아래 extraEnv 로 SSL 활성화)
+  dynamodb:
+    endpoint: ""
+  awsRegion: ""                     # --set: AWS_REGION
+  awsLocalCredentials: false        # 운영 권한은 Pod Identity
+
+  externalSecret:                   # Secrets Manager <SECRET_PREFIX>/<서비스> → Secret (External Secrets Operator)
+    enabled: true
+    store: aws-secrets-manager      # scripts/aws/addons.sh 가 만드는 ClusterSecretStore
+    keyPrefix: ""                   # --set: SECRET_PREFIX (기본 <PROJECT>/<ENV_NAME>)
+
+  irsaRoleArnFormat: ""             # IRSA 미사용 (Pod Identity — 역할 연결은 Terraform)
+
+# ElastiCache 전송 중 암호화(TLS) — 앱 설정 변경 없이 Spring 표준 속성으로 켬
+extraEnv:
+  SPRING_DATA_REDIS_SSL_ENABLED: "true"
+
+# 리소스: CPU limit 없음 (JVM 기동 시 CPU 제한 → readiness 실패 방지), 메모리 requests = limits
+resources:
+  requests: { cpu: 250m, memory: 768Mi }
+  limits:
+    cpu: null
+    memory: 768Mi
+
+# 종료 순서: preStop 20s → SIGTERM → graceful 20s → 여유
+terminationGracePeriodSeconds: 60
+preStopSleepSeconds: 20
+
+# replica·HPA·PDB 는 서비스별로 scripts/aws/deploy.sh 에서 지정 (gateway 2·HPA 2~4·PDB / 나머지 1)
+autoscaling:
+  enabled: false
+  minReplicas: 1
+pdb:
+  enabled: false
+
+ingress:
+  enabled: false                    # AWS 는 Ingress 대신 TargetGroupBinding
+
+probes:
+  startup:
+    failureThreshold: 60            # JVM 7개 동시 기동 대비 최대 300s (기동 시간 측정 후 조정)

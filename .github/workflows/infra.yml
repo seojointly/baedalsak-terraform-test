@@ -1,0 +1,157 @@
+# =============================================================================
+# AWS 인프라 — 수동 실행(workflow_dispatch)
+#   persistent : persistent 스택만 apply (ECR·Secrets Manager 등, 처음 한 번 + 변경 시)
+#   plan       : 두 스택 plan
+#   up         : persistent → ephemeral apply → 애드온 → DB·MQ 초기화 → 앱 배포 → smoke test
+#   down       : 앱·애드온 삭제 → ephemeral destroy (RDS 최종 스냅샷 남음)
+# 필요한 레포 변수(Settings → Secrets and variables → Actions → Variables): docs/aws-runbook.md 표
+#   필수: AWS_REGION · PROJECT · ENV_NAME · AZS · KUBERNETES_VERSION · AWS_ROLE_ARN · TF_STATE_BUCKET
+#   선택: TEAM_MEMBER_ARNS · TEAM_MEMBER_POLICY · ALB_CERTIFICATE_ARN · CLUSTER_NAME · SECRET_PREFIX · SSM_PREFIX · LOG_GROUP
+# =============================================================================
+name: infra
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: persistent | plan | up | down
+        type: choice
+        options: [plan, persistent, up, down]
+        default: plan
+      image_tag:
+        description: up 일 때 배포할 이미지 태그 (images 워크플로 결과)
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+env:
+  # scripts/aws/env.sh 가 읽는 값 (선택 값이 비면 <PROJECT>-<ENV_NAME> 규칙)
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  PROJECT: ${{ vars.PROJECT }}
+  ENV_NAME: ${{ vars.ENV_NAME }}
+  CLUSTER_NAME: ${{ vars.CLUSTER_NAME || format('{0}-{1}', vars.PROJECT, vars.ENV_NAME) }}
+  SECRET_PREFIX: ${{ vars.SECRET_PREFIX }}
+  SSM_PREFIX: ${{ vars.SSM_PREFIX }}
+  LOG_GROUP: ${{ vars.LOG_GROUP }}
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  # Terraform 변수 (같은 값을 TF_VAR_* 로)
+  TF_IN_AUTOMATION: "true"
+  TF_VAR_region: ${{ vars.AWS_REGION }}
+  TF_VAR_project: ${{ vars.PROJECT }}
+  TF_VAR_env: ${{ vars.ENV_NAME }}
+  TF_VAR_azs: ${{ vars.AZS }}
+  TF_VAR_kubernetes_version: ${{ vars.KUBERNETES_VERSION }}
+  TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
+  TF_VAR_cluster_name: ${{ vars.CLUSTER_NAME }}
+  TF_VAR_secret_prefix: ${{ vars.SECRET_PREFIX }}
+  TF_VAR_ssm_prefix: ${{ vars.SSM_PREFIX }}
+  TF_VAR_log_group_name: ${{ vars.LOG_GROUP }}
+  TF_VAR_team_member_arns: ${{ vars.TEAM_MEMBER_ARNS || '[]' }}
+  TF_VAR_team_member_policy: ${{ vars.TEAM_MEMBER_POLICY || 'AmazonEKSAdminViewPolicy' }}
+  TF_VAR_alb_certificate_arn: ${{ vars.ALB_CERTIFICATE_ARN }}
+
+jobs:
+  infra:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check variables
+        run: |
+          for v in AWS_REGION PROJECT ENV_NAME AWS_ROLE_ARN TF_STATE_BUCKET TF_VAR_azs TF_VAR_kubernetes_version; do
+            if [ -z "${!v}" ]; then echo "::error::레포 변수가 없습니다: $v (docs/aws-runbook.md 표 참고)"; exit 1; fi
+          done
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 7200
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.3
+          terraform_wrapper: false
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: terraform init
+        run: |
+          for s in persistent ephemeral; do
+            terraform -chdir=terraform/$s init -input=false \
+              -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="region=$AWS_REGION"
+          done
+
+      # ---------- plan ----------
+      - name: plan
+        if: inputs.action == 'plan'
+        run: |
+          terraform -chdir=terraform/persistent plan -input=false
+          terraform -chdir=terraform/ephemeral plan -input=false || echo "persistent 를 먼저 apply 해야 ephemeral plan 이 됩니다"
+
+      # ---------- persistent / up ----------
+      - name: apply persistent
+        if: inputs.action == 'persistent' || inputs.action == 'up'
+        run: terraform -chdir=terraform/persistent apply -input=false -auto-approve
+
+      - name: apply ephemeral (최신 최종 스냅샷에서 RDS 복원)
+        if: inputs.action == 'up'
+        run: |
+          SNAP=$(aws rds describe-db-snapshots --snapshot-type manual \
+            --query "reverse(sort_by(DBSnapshots[?starts_with(DBSnapshotIdentifier,'${PROJECT}-${ENV_NAME}-final-') && Status=='available'], &SnapshotCreateTime))[0].DBSnapshotIdentifier" \
+            --output text)
+          ARGS=()
+          if [ -n "$SNAP" ] && [ "$SNAP" != "None" ]; then echo "restore from $SNAP"; ARGS+=(-var "db_snapshot_identifier=$SNAP"); fi
+          terraform -chdir=terraform/ephemeral apply -input=false -auto-approve "${ARGS[@]}"
+
+      - name: kubeconfig
+        if: inputs.action == 'up' || inputs.action == 'down'
+        run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION" || echo "cluster not found"
+
+      - name: addons
+        if: inputs.action == 'up'
+        run: ./scripts/aws/addons.sh
+
+      - name: DB·MQ init
+        if: inputs.action == 'up'
+        run: ./scripts/aws/db-init.sh
+
+      - name: deploy apps
+        if: inputs.action == 'up' && inputs.image_tag != ''
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: ./scripts/aws/deploy.sh "$IMAGE_TAG"
+
+      - name: smoke test
+        if: inputs.action == 'up' && inputs.image_tag != ''
+        run: ./scripts/aws/smoke-test.sh
+
+      - name: debug on failure
+        if: failure() && inputs.action == 'up'
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n "$ENV_NAME" get externalsecret,targetgroupbinding || true
+          for d in gateway member store order payment delivery; do
+            echo "===== $d"; kubectl -n "$ENV_NAME" logs "deploy/$d" --tail=80 || true
+          done
+          kubectl -n "$ENV_NAME" get events --sort-by=.lastTimestamp | tail -40 || true
+
+      # ---------- down ----------
+      - name: remove apps and addons
+        if: inputs.action == 'down'
+        run: ./scripts/aws/down.sh
+
+      - name: destroy ephemeral (RDS 최종 스냅샷 생성)
+        if: inputs.action == 'down'
+        run: terraform -chdir=terraform/ephemeral destroy -input=false -auto-approve

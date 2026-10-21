@@ -1,0 +1,79 @@
+# =============================================================================
+# 앱 이미지 빌드 → ECR (<PROJECT>-<ENV_NAME>/<서비스>:<서버 커밋 SHA 7자리>)
+#   서버 레포(vars.SERVER_REPO)를 체크아웃해서 서비스 6개를 amd64 로 빌드
+#   끝나면 Summary 에 태그가 나옴 → infra 워크플로 up 의 image_tag 로 사용
+#   선행: infra 워크플로 action=persistent (ECR 저장소 생성)
+# 레포 Variables: AWS_REGION · PROJECT · ENV_NAME · AWS_ROLE_ARN · SERVER_REPO · SERVER_REF
+# 레포 Secrets  : SERVER_REPO_TOKEN (서버 레포가 private 일 때만 — contents:read 권한 PAT)
+# =============================================================================
+name: images
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_ref:
+        description: 서버 레포 브랜치·태그·커밋 (비우면 vars.SERVER_REF)
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  PROJECT: ${{ vars.PROJECT }}
+  ENV_NAME: ${{ vars.ENV_NAME }}
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+  SERVER_REPO: ${{ vars.SERVER_REPO }}
+  SERVER_REF: ${{ inputs.server_ref || vars.SERVER_REF }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [gateway, member, store, order, payment, delivery]
+    steps:
+      - name: check variables
+        run: |
+          : "${AWS_REGION:?레포 변수 AWS_REGION 이 없습니다}"
+          : "${PROJECT:?레포 변수 PROJECT 가 없습니다}"
+          : "${ENV_NAME:?레포 변수 ENV_NAME 이 없습니다}"
+          : "${AWS_ROLE_ARN:?레포 변수 AWS_ROLE_ARN 이 없습니다}"
+          : "${SERVER_REPO:?레포 변수 SERVER_REPO 가 없습니다}"
+          : "${SERVER_REF:?입력 server_ref 또는 레포 변수 SERVER_REF 가 필요합니다}"
+
+      # public 서버 레포는 기본 토큰, private 이면 secrets.SERVER_REPO_TOKEN
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SERVER_REPO }}
+          ref: ${{ env.SERVER_REF }}
+          token: ${{ secrets.SERVER_REPO_TOKEN || github.token }}
+
+      - id: tag
+        run: echo "tag=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          build-args: MODULE=${{ matrix.service }}
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-${{ env.ENV_NAME }}/${{ matrix.service }}:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - run: echo "### ${{ matrix.service }} → image_tag **${{ steps.tag.outputs.tag }}** (${{ env.SERVER_REPO }}@${{ env.SERVER_REF }})" >> "$GITHUB_STEP_SUMMARY"
