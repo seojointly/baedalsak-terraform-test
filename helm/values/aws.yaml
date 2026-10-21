@@ -37,14 +37,16 @@ global:
 extraEnv:
   SPRING_DATA_REDIS_SSL_ENABLED: "true"
 
-# 리소스: CPU limit 없음 (JVM 기동 시 CPU 제한 → readiness 실패 방지), 메모리 requests = limits
+# [임시값 — 결정 예정] 리소스: CPU limit 없음 (JVM 기동 시 CPU 제한 → readiness 실패 방지), 메모리 requests = limits
+#   팀 결정(CLAUDE.md)은 limit 1 코어. AWS 에서 검증한 값으로 우선 운영하고 확정 후 변경
 resources:
   requests: { cpu: 250m, memory: 768Mi }
   limits:
     cpu: null
     memory: 768Mi
 
-# 종료 순서: preStop 20s → SIGTERM → graceful 20s → 여유
+# [임시값 — 결정 예정] 종료 순서: preStop 20s → SIGTERM → graceful 20s → 여유
+#   팀 결정은 preStop 10s · grace 45. ALB 대상 제외(헬스체크 10s×2·deregistration 30s)가 10s 보다 길어 AWS 검증값 사용
 terminationGracePeriodSeconds: 60
 preStopSleepSeconds: 20
 
@@ -60,4 +62,5 @@ ingress:
 
 probes:
   startup:
-    failureThreshold: 60            # JVM 7개 동시 기동 대비 최대 300s (기동 시간 측정 후 조정)
+    # [임시값 — 결정 예정] 팀 결정은 ×30(최대 150s). 노드 2대에 서비스 6개 동시 기동 대비 AWS 검증값 사용
+    failureThreshold: 60            # 5s × 60 = 최대 300s (기동 시간 측정 후 조정)
